@@ -43,7 +43,7 @@ def observation(xTrue, xd, u, i):
 
     # add noise to gps x-y
     if i % 15 == 0:
-        z = observation_model(xTrue) + GPS_NOISE @ np.random.randn(2, 1)
+        z = observation_model(xTrue) + GPS_MORE_NOISE @ np.random.randn(2, 1)
     else:
         z = observation_model(xTrue) + GPS_NOISE @ np.random.randn(2, 1)
 
@@ -62,7 +62,7 @@ def motion_model(x, u):
                   [0, 0, 0, 0]])
 
     B = np.array([[DT * math.cos(x[2, 0]), 0],
-                  [DT * math.sin(x[2, 0]), 0],
+                  [DT * math.cos(x[2, 0]), 0],
                   [0.0, DT],
                   [1.0, 0.0]])
 
@@ -134,6 +134,57 @@ def ekf_estimation(xEst, PEst, z, u):
     PEst = (np.eye(len(xEst)) - K @ jH) @ PPred
     return xEst, PEst
 
+# alpha is quantile limit for outlier detection of Chi-square distribution of Maha distant
+def rkf_estimation(jH, Q, R, z, u, xEst, PEst, alpha=0.9):
+    #  Predict
+    xPred = motion_model(xEst, u)
+    jF = jacob_f(xEst, u)
+    PPred = jF @ PEst @ jF.T + Q
+    PEst = PPred
+
+    #De-correlation
+    L = np.linalg.cholesky(R)
+    Linv = np.linalg.inv(L)
+    zPred = observation_model(xPred) # y_k
+    zPredDeCor = Linv@zPred # \bar(y_k)
+    jHDeCor = Linv@jH 
+
+    #Sequential update
+    m = max(z.shape)
+    quantileChiSquare=2.706
+
+    for j in range(m):
+
+        smallestOne = None
+        minMahaDist = 100
+        remainIdx = {i for i in range(m)}
+        choosedZ = None
+        for i in remainIdx:
+            h = jHDeCor[i] 
+            Yki = h@xEst
+            COVki = h@PEst@h.T+1
+            mahaDist = (z[i]-Yki)**2/COVki
+            print(mahaDist)
+
+            if minMahaDist > mahaDist[0]:
+                minMahaDist = mahaDist[0]
+                smallestOne = [Yki, COVki, mahaDist[0]]
+                choosedZ = z[i]
+        
+        k = 1
+        print(smallestOne)
+        if smallestOne[2] > quantileChiSquare:
+            k = smallestOne[2]/quantileChiSquare
+        
+        smallestOne[1] = k*smallestOne[1]
+
+        # update in jth interation
+        K = PEst@jHDeCor[j].T / smallestOne[1]
+        print(K.shape, (choosedZ - smallestOne[0]).shape)
+        xEst = xEst + K * np.array([(choosedZ - smallestOne[0])])
+        PEst = PEst - smallestOne[1]*K@K.T
+    return xEst, PEst
+        
 
 def plot_covariance_ellipse(xEst, PEst):  # pragma: no cover
     Pxy = PEst[0:2, 0:2]
@@ -166,15 +217,16 @@ def main():
     time = 0.0
 
     # State Vector [x y yaw v]'
-    xEst = np.zeros((4, 1))
+    xEst = xEstRKF = np.zeros((4, 1))
     xTrue = np.zeros((4, 1))
-    PEst = np.eye(4)
+    PEst = PEstRKF = np.eye(4)
 
     xDR = np.zeros((4, 1))  # Dead reckoning
 
     # history
-    hxEst = xEst
+    hxEst = hxEstRKF= xEst
     hxTrue = xTrue
+
     hxDR = xTrue
     hz = np.zeros((2, 1))
 
@@ -187,13 +239,16 @@ def main():
 
         xTrue, z, xDR, ud = observation(xTrue, xDR, u, i)
 
-        xEst, PEst = ekf_estimation(xEst, PEst, z, ud)
+        # xEst, PEst = ekf_estimation(xEst, PEst, z, ud)
+        
+        xEstRKF, PEstRKF = rkf_estimation(jH=jacob_h(), Q=Q, R=R, z=z, u=ud, xEst=xEstRKF, PEst=PEstRKF, alpha=0.9)
 
         # store data history
-        hxEst = np.hstack((hxEst, xEst))
+        # hxEst = np.hstack((hxEst, xEst))
+        hxEstRKF = np.hstack((hxEstRKF, xEstRKF))
         hxDR = np.hstack((hxDR, xDR))
-        hxTrue = np.hstack((hxTrue, xTrue))
         hz = np.hstack((hz, z))
+        hxTrue = np.hstack((hxTrue, xTrue))
 
         if show_animation:
             plt.cla()
@@ -205,9 +260,9 @@ def main():
                      hxTrue[1, :].flatten(), "-b")
             plt.plot(hxDR[0, :].flatten(),
                      hxDR[1, :].flatten(), "-k")
-            plt.plot(hxEst[0, :].flatten(),
-                     hxEst[1, :].flatten(), "-r")
-            plot_covariance_ellipse(xEst, PEst)
+            # plt.plot(hxEstRKF[0, :].flatten(),
+            #          hxEstRKF[1, :].flatten(), "-r")
+            # plot_covariance_ellipse(xEst, PEst)
             plt.axis("equal")
             plt.grid(True)
             plt.pause(0.001)

@@ -23,7 +23,7 @@ R = np.diag([1.0, 1.0]) ** 2  # Observation x,y position covariance
 #  Simulation parameter
 INPUT_NOISE = np.diag([1.0, np.deg2rad(30.0)]) ** 2
 GPS_NOISE = np.diag([0.5, 0.5]) ** 2
-GPS_MORE_NOISE = np.diag([2,2]) ** 2
+GPS_MORE_NOISE = np.diag([2.2,2.2]) ** 2
 
 DT = 0.1  # time tick [s]
 SIM_TIME = 50.0  # simulation time [s]
@@ -43,7 +43,7 @@ def observation(xTrue, xd, u, i):
 
     # add noise to gps x-y
     if i % 15 == 0:
-        z = observation_model(xTrue) + GPS_NOISE @ np.random.randn(2, 1)
+        z = observation_model(xTrue) + GPS_MORE_NOISE @ np.random.randn(2, 1)
     else:
         z = observation_model(xTrue) + GPS_NOISE @ np.random.randn(2, 1)
 
@@ -135,6 +135,71 @@ def ekf_estimation(xEst, PEst, z, u):
     return xEst, PEst
 
 
+# alpha is quantile limit for outlier detection of Chi-square distribution of Maha distant
+def rkf_estimation(jH, Q, R, z, u, xEst, PEst, alpha=0.9):
+    #  Predict
+    xPred = motion_model(xEst, u)
+    jF = jacob_f(xEst, u)
+    PPred = jF @ PEst @ jF.T + Q
+    PEst = PPred
+
+    xEst = xPred
+
+    #De-correlation
+    L = np.linalg.cholesky(R)
+    Linv = np.linalg.inv(L)
+    # zPred = observation_model(xPred) # y_k
+    # zPRedDeCor = Linv@zPred #\bar(y_k)
+    zDeCor = Linv@z
+    # print(z, " and ", zDeCor)
+    jHDeCor = Linv@jH 
+
+    #Sequential update
+    m = max(z.shape)
+    quantileChiSquare=1.5#2.706
+    remainIdx = {i for i in range(m)}
+
+    for j in range(m):
+
+        smallestOne = None
+        minMahaDist = 100
+        choosedZ = None
+        choosedIdx = None
+        choosedH = None
+        for i in remainIdx:
+            h = jHDeCor[i] 
+            Yki = h@xEst
+            COVki = h@PEst@h.T+1
+            mahaDist = (zDeCor[i]-Yki)**2/COVki
+
+            if minMahaDist > mahaDist[0]:
+                minMahaDist = mahaDist[0]
+                smallestOne = [Yki, COVki, mahaDist[0]]
+                choosedZ = zDeCor[i]
+                choosedIdx = i
+                choosedH = h
+                print(COVki)
+        remainIdx = remainIdx - {choosedIdx}
+        k = 1
+        # print(smallestOne)
+        if smallestOne[2] > quantileChiSquare:
+            k = smallestOne[2]/quantileChiSquare
+        
+        smallestOne[1] = k*smallestOne[1]
+        # update in jth interation
+        # K = PEst@jHDeCor[j].T / smallestOne[1]
+        K = PEst@choosedH.T / smallestOne[1]
+        K = K.reshape(len(K),1)
+        # print(K.shape, (choosedZ - smallestOne[0]).shape)
+        xEst = xEst + K @ np.array([(choosedZ - smallestOne[0])])
+        # xEst = xEst + K *(choosedZ - smallestOne[0])
+        # print(K@K.T)
+        # print(K.T@K)
+        PEst = PEst - smallestOne[1]*K@K.T
+        print(xEst)
+    return xEst, PEst
+        
+
 def plot_covariance_ellipse(xEst, PEst):  # pragma: no cover
     Pxy = PEst[0:2, 0:2]
     eigval, eigvec = np.linalg.eig(Pxy)
@@ -166,14 +231,15 @@ def main():
     time = 0.0
 
     # State Vector [x y yaw v]'
-    xEst = np.zeros((4, 1))
+    xEst = xEstRKF = np.zeros((4, 1))
     xTrue = np.zeros((4, 1))
-    PEst = np.eye(4)
+    PEst = PEstRKF =  np.eye(4)
 
     xDR = np.zeros((4, 1))  # Dead reckoning
 
     # history
     hxEst = xEst
+    hxEstRKF = xEstRKF
     hxTrue = xTrue
     hxDR = xTrue
     hz = np.zeros((2, 1))
@@ -186,11 +252,13 @@ def main():
         u = calc_input()
 
         xTrue, z, xDR, ud = observation(xTrue, xDR, u, i)
+        xEstRKF, PEstRKF = rkf_estimation(jH=jacob_h(), Q=Q, R=R, z=z, u=ud, xEst=xEstRKF, PEst=PEstRKF, alpha=0.9)
 
         xEst, PEst = ekf_estimation(xEst, PEst, z, ud)
 
         # store data history
         hxEst = np.hstack((hxEst, xEst))
+        hxEstRKF = np.hstack((hxEstRKF, xEstRKF))
         hxDR = np.hstack((hxDR, xDR))
         hxTrue = np.hstack((hxTrue, xTrue))
         hz = np.hstack((hz, z))
@@ -201,10 +269,12 @@ def main():
             plt.gcf().canvas.mpl_connect('key_release_event',
                     lambda event: [exit(0) if event.key == 'escape' else None])
             plt.plot(hz[0, :], hz[1, :], ".g")
-            plt.plot(hxTrue[0, :].flatten(),
-                     hxTrue[1, :].flatten(), "-b")
+            # plt.plot(hxTrue[0, :].flatten(),
+            #          hxTrue[1, :].flatten(), "-b")
             plt.plot(hxDR[0, :].flatten(),
                      hxDR[1, :].flatten(), "-k")
+            plt.plot(hxEstRKF[0, :].flatten(),
+                     hxEstRKF[1, :].flatten(), "-m")
             plt.plot(hxEst[0, :].flatten(),
                      hxEst[1, :].flatten(), "-r")
             plot_covariance_ellipse(xEst, PEst)

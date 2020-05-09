@@ -187,14 +187,14 @@ def motion_update(grid_map, u, yaw):
 
     x_shift = grid_map.dx // grid_map.xy_reso
     y_shift = grid_map.dy // grid_map.xy_reso
-
+    grid_map.data = gaussian_filter(grid_map.data, sigma=MOTION_STD)
     if abs(x_shift) >= 1.0 or abs(y_shift) >= 1.0:  # map should be shifted
         grid_map = map_shift(grid_map, int(x_shift), int(y_shift))
         grid_map.dx -= x_shift * grid_map.xy_reso
         grid_map.dy -= y_shift * grid_map.xy_reso
 
-    grid_map.data = gaussian_filter(grid_map.data, sigma=MOTION_STD)
-
+    #grid_map.data = gaussian_filter(grid_map.data, sigma=MOTION_STD)
+    print(grid_map.data, np.sum(grid_map.data))
     return grid_map
 
 
@@ -219,6 +219,8 @@ def main():
     xTrue = np.zeros((4, 1))
     grid_map = init_gmap(XY_RESO, MINX, MINY, MAXX, MAXY)
     mx, my = calc_grid_index(grid_map)  # for grid map visualization
+    print(mx)
+    print(my)
 
     while SIM_TIME >= time:
         time += DT
